@@ -46,8 +46,6 @@ CACHE_FILE="${CONFIG_DIR}/market-prices.json"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 PIP_BIN="${VENV_DIR}/bin/pip"
 
-CHROME_BIN=""
-
 # -----------------------------------------------------------------------------
 # Output helpers
 # -----------------------------------------------------------------------------
@@ -118,56 +116,6 @@ This does not look like a complete checkout of the repository."
 done
 
 # -----------------------------------------------------------------------------
-# Find Google Chrome
-# -----------------------------------------------------------------------------
-
-find_chrome() {
-    local candidates=(
-        "/usr/bin/google-chrome"
-        "/usr/bin/google-chrome-stable"
-        "/usr/bin/chrome"
-        "/usr/bin/chromium"
-        "/usr/bin/chromium-browser"
-    )
-
-    for candidate in "${candidates[@]}"; do
-        if [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    if command -v google-chrome >/dev/null 2>&1; then
-        command -v google-chrome
-        return 0
-    fi
-
-    if command -v google-chrome-stable >/dev/null 2>&1; then
-        command -v google-chrome-stable
-        return 0
-    fi
-
-    if command -v chromium >/dev/null 2>&1; then
-        command -v chromium
-        return 0
-    fi
-
-    return 1
-}
-
-CHROME_BIN="$(find_chrome || true)"
-
-if [[ -z "$CHROME_BIN" ]]; then
-    die "Google Chrome/Chromium was not found.
-
-Install Google Chrome first, then run:
-
-    ./install.sh"
-fi
-
-success "Browser found: ${CHROME_BIN}"
-
-# -----------------------------------------------------------------------------
 # Create directories
 # -----------------------------------------------------------------------------
 
@@ -203,35 +151,6 @@ info "Installing Python dependencies..."
 "${PIP_BIN}" install -r "${PROJECT_DIR}/requirements.txt"
 
 success "Python dependencies installed."
-
-# -----------------------------------------------------------------------------
-# Verify Playwright + system Chrome
-# -----------------------------------------------------------------------------
-
-info "Testing Playwright with system Chrome..."
-
-if ! "${PYTHON_BIN}" - <<PY
-from playwright.sync_api import sync_playwright
-
-chrome = "${CHROME_BIN}"
-
-with sync_playwright() as p:
-    browser = p.chromium.launch(
-        headless=True,
-        executable_path=chrome,
-    )
-    page = browser.new_page()
-    page.goto("https://example.com", wait_until="domcontentloaded", timeout=30000)
-    assert page.title()
-    browser.close()
-
-print("Playwright + Chrome OK")
-PY
-then
-    die "Playwright could not launch ${CHROME_BIN}."
-fi
-
-success "Playwright + system Chrome verified."
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -318,7 +237,6 @@ RestartSec=10
 Environment=HOME=${HOME_DIR}
 Environment=USER=${USERNAME}
 Environment=MARKET_PRICES_CONFIG_DIR=${CONFIG_DIR}
-Environment=MARKET_PRICES_CHROME=${CHROME_BIN}
 
 StandardOutput=journal
 StandardError=journal
@@ -394,9 +312,6 @@ echo "  ${PROJECT_DIR}"
 echo
 echo "Python:"
 echo "  ${PYTHON_BIN}"
-echo
-echo "Chrome:"
-echo "  ${CHROME_BIN}"
 echo
 echo "Configuration:"
 echo "  ${CONFIG_DIR}"
