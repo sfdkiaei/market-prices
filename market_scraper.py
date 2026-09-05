@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 
+import html
 import json
 import logging
-import os
 import re
-import shutil
 import sys
 import time
 from datetime import datetime
 
 import requests
-from playwright.sync_api import sync_playwright
 
 
 # =============================================================================
@@ -24,18 +22,11 @@ WALLGOLD_URL = "https://api.wallgold.ir/api/v1/price?side=buy&symbol=GLD_18C_750
 CHANDE_URL = "https://chande.net/api/v1/prices/USD"
 
 REQUEST_TIMEOUT = 20
-BROWSER_TIMEOUT = 30
 
-# An existing Chrome/Chromium installation is used; Playwright never
-# downloads its own browser. Set MARKET_PRICES_CHROME to override the
-# autodetected path.
-CHROME_CANDIDATES = (
-    "google-chrome",
-    "google-chrome-stable",
-    "chromium",
-    "chromium-browser",
-    "chrome",
-)
+# Trading Economics sporadically answers the first request with 403
+# before it hands out a session cookie; a couple of retries clear it.
+TRADING_ECONOMICS_RETRIES = 3
+RETRY_BACKOFF = 2
 
 
 # =============================================================================
@@ -106,102 +97,56 @@ def create_requests_session():
 
 
 # =============================================================================
-# Chrome / Playwright
-# =============================================================================
-
-
-def find_chrome():
-    """
-    Locate an installed Chrome/Chromium binary.
-
-    MARKET_PRICES_CHROME wins if it is set; the installer puts the browser
-    it detected there via the systemd unit.
-    """
-
-    override = os.environ.get("MARKET_PRICES_CHROME")
-
-    if override:
-        if not os.access(override, os.X_OK):
-            raise RuntimeError(
-                f"MARKET_PRICES_CHROME is not executable: {override}"
-            )
-
-        return override
-
-    for name in CHROME_CANDIDATES:
-        path = shutil.which(name)
-
-        if path:
-            return path
-
-    raise RuntimeError(
-        "No Chrome/Chromium binary found. Install Google Chrome or "
-        "Chromium, or set MARKET_PRICES_CHROME to its path."
-    )
-
-
-def create_browser(playwright):
-    """
-    Launch the existing Chrome/Chromium installation.
-
-    No Playwright-managed Chromium and no ChromeDriver are required.
-    """
-
-    chrome_binary = find_chrome()
-
-    logging.info(
-        "Launching browser: %s",
-        chrome_binary,
-    )
-
-    browser = playwright.chromium.launch(
-        executable_path=chrome_binary,
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-            "--disable-blink-features=AutomationControlled",
-            "--lang=en-US",
-        ],
-    )
-
-    return browser
-
-
-# =============================================================================
 # Trading Economics
 # =============================================================================
 
+# The commodities table is server-rendered, so a plain HTTP request is
+# enough - no browser required. Each row looks like:
+#
+#   <tr data-symbol="CL1:COM" ...>
+#       <td class="datatable-item-first">
+#           <a href="/commodity/crude-oil"><b>Crude Oil</b></a>
+#           <div style='font-size: 10px;'>USD/Bbl</div>
+#       </td>
+#       <td id="p" class="datatable-item">91.480</td>
+#       ...
+#   </tr>
 
-def extract_trading_economics(page):
+TE_ROW_RE = re.compile(
+    r'<tr\s+data-symbol="[^"]+"(.*?)</tr>',
+    re.S,
+)
+
+TE_NAME_RE = re.compile(
+    r"<b>(.*?)</b>",
+    re.S,
+)
+
+TE_PRICE_RE = re.compile(
+    r'<td[^>]*\bid="p"[^>]*>(.*?)</td>',
+    re.S,
+)
+
+
+def strip_tags(markup):
+    text = re.sub(r"<[^>]+>", " ", markup)
+
+    return html.unescape(text).strip()
+
+
+def fetch_trading_economics(session):
     """
-    Extract Crude Oil, Gold and Silver from the rendered
-    Trading Economics commodities page.
+    Fetch Crude Oil, Gold and Silver from the Trading Economics
+    commodities page.
 
-    We intentionally inspect rendered DOM/table content instead
-    of relying on Trading Economics internal JSON endpoints.
+    We read the rendered table markup rather than relying on Trading
+    Economics internal JSON endpoints.
     """
 
     logging.info(
-        "Opening Trading Economics in Chrome: %s",
+        "Fetching Trading Economics: %s",
         TRADING_ECONOMICS_URL,
     )
-
-    page.goto(
-        TRADING_ECONOMICS_URL,
-        wait_until="domcontentloaded",
-        timeout=BROWSER_TIMEOUT * 1000,
-    )
-
-    logging.info(
-        "Trading Economics page loaded: %s",
-        page.url,
-    )
-
-    # Allow dynamic content to settle.
-    page.wait_for_timeout(3000)
 
     results = {
         "crude_oil": {
@@ -224,129 +169,77 @@ def extract_trading_economics(page):
         "silver": "silver",
     }
 
-    # -------------------------------------------------------------------------
-    # First approach: inspect table rows.
-    # -------------------------------------------------------------------------
+    markup = None
 
-    rows = page.locator("table tr")
-
-    row_count = rows.count()
-
-    logging.info(
-        "Found %d table rows",
-        row_count,
-    )
-
-    for index in range(row_count):
-        try:
-            row = rows.nth(index)
-
-            cells = row.locator("th, td")
-
-            cell_count = cells.count()
-
-            if cell_count == 0:
-                continue
-
-            texts = []
-
-            for cell_index in range(cell_count):
-                text = cells.nth(cell_index).inner_text().strip()
-                texts.append(text)
-
-            if not texts:
-                continue
-
-            first_cell = texts[0].lower().strip()
-
-            for name, key in wanted.items():
-                if first_cell != name:
-                    continue
-
-                logging.info(
-                    "Found Trading Economics row: %s",
-                    texts,
-                )
-
-                # Usually:
-                #
-                # [Crude Oil, USD/Bbl, 90.60, ...]
-                #
-                # or:
-                #
-                # [Crude Oil, USD/Bbl, 90.60, 0.123, ...]
-
-                for text in texts[1:]:
-                    # Skip units.
-                    if "/" in text:
-                        continue
-
-                    value = to_float(text)
-
-                    if value is not None:
-                        results[key]["value"] = value
-
-                        logging.info(
-                            "Trading Economics %s = %s",
-                            key,
-                            value,
-                        )
-
-                        break
-
-        except Exception:
-            continue
-
-    # -------------------------------------------------------------------------
-    # Second approach: inspect all visible page text.
-    #
-    # This handles cases where Trading Economics doesn't expose
-    # the data in a conventional <table>.
-    # -------------------------------------------------------------------------
-
-    missing = [key for key, value in results.items() if value["value"] is None]
-
-    if missing:
-        logging.info(
-            "Some Trading Economics values were not found in tables. "
-            "Trying rendered page text."
+    for attempt in range(1, TRADING_ECONOMICS_RETRIES + 1):
+        response = session.get(
+            TRADING_ECONOMICS_URL,
+            timeout=REQUEST_TIMEOUT,
+            headers={
+                "Accept": (
+                    "text/html,application/xhtml+xml,"
+                    "application/xml;q=0.9,*/*;q=0.8"
+                ),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
         )
 
-        try:
-            body_text = page.locator("body").inner_text()
-        except Exception:
-            body_text = ""
+        if response.status_code == 200:
+            markup = response.text
+            break
 
-        lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+        logging.warning(
+            "Trading Economics returned HTTP %d (attempt %d/%d)",
+            response.status_code,
+            attempt,
+            TRADING_ECONOMICS_RETRIES,
+        )
 
-        for i, line in enumerate(lines):
-            normalized = line.lower().strip()
+        if attempt < TRADING_ECONOMICS_RETRIES:
+            time.sleep(RETRY_BACKOFF)
 
-            for name, key in wanted.items():
-                if key not in missing:
-                    continue
+    if markup is None:
+        raise RuntimeError(
+            "Trading Economics did not return a usable page after "
+            f"{TRADING_ECONOMICS_RETRIES} attempts"
+        )
 
-                if normalized != name:
-                    continue
+    for row in TE_ROW_RE.findall(markup):
+        name_match = TE_NAME_RE.search(row)
+        price_match = TE_PRICE_RE.search(row)
 
-                # Search following lines.
-                for candidate in lines[i + 1 : i + 8]:
-                    # Don't accidentally interpret a unit as a value.
-                    if "/" in candidate:
-                        continue
+        if not name_match or not price_match:
+            continue
 
-                    value = to_float(candidate)
+        key = wanted.get(strip_tags(name_match.group(1)).lower())
 
-                    if value is not None:
-                        results[key]["value"] = value
+        # The first matching row wins; some names reappear further
+        # down the page.
+        if key is None or results[key]["value"] is not None:
+            continue
 
-                        logging.info(
-                            "Trading Economics %s = %s",
-                            key,
-                            value,
-                        )
+        value = to_float(strip_tags(price_match.group(1)))
 
-                        break
+        if value is None:
+            continue
+
+        results[key]["value"] = value
+
+        logging.info(
+            "Trading Economics %s = %s",
+            key,
+            value,
+        )
+
+    missing = sorted(
+        key for key, item in results.items() if item["value"] is None
+    )
+
+    if missing:
+        logging.warning(
+            "Trading Economics values not found: %s",
+            ", ".join(missing),
+        )
 
     return results
 
@@ -470,41 +363,14 @@ def collect():
         },
     }
 
+    session = create_requests_session()
+
     # -------------------------------------------------------------------------
     # Trading Economics
     # -------------------------------------------------------------------------
 
     try:
-        with sync_playwright() as playwright:
-            browser = None
-
-            try:
-                browser = create_browser(playwright)
-
-                context = browser.new_context(
-                    viewport={
-                        "width": 1920,
-                        "height": 1080,
-                    },
-                    locale="en-US",
-                    user_agent=(
-                        "Mozilla/5.0 (X11; Linux x86_64) "
-                        "AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) "
-                        "Chrome/151.0.0.0 Safari/537.36"
-                    ),
-                )
-
-                page = context.new_page()
-
-                result["tradingeconomics"] = extract_trading_economics(page)
-
-            finally:
-                if browser is not None:
-                    try:
-                        browser.close()
-                    except Exception:
-                        pass
+        result["tradingeconomics"] = fetch_trading_economics(session)
 
     except Exception as exc:
         logging.exception(
@@ -515,8 +381,6 @@ def collect():
     # -------------------------------------------------------------------------
     # REST APIs
     # -------------------------------------------------------------------------
-
-    session = create_requests_session()
 
     try:
         result["wallgold"] = fetch_wallgold(session)
