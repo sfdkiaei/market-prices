@@ -1,124 +1,234 @@
-# Market Price Scraper
+# Market Prices
 
-Extracts:
+A GNOME desktop market-price indicator for Linux.
 
-1. Trading Economics
-   - Crude Oil
-   - Gold
-   - Silver
+A Python scraper collects prices, a systemd **user** service runs it on an
+interval and writes a JSON cache, and a GNOME Shell extension reads that cache
+and shows the values in the top bar.
 
-2. WallGold
-   - Gold 18K (`gold18k`), in Iranian toman
+```
+market_scraper.py            one-shot scrape, prints JSON to stdout
+        |
+        v
+market_prices_service.py     systemd user service; runs the scraper on a loop,
+        |                    merges + writes the cache atomically
+        v
+~/.config/market-prices/market-prices.json
+        |
+        v
+GNOME extension              top bar label + popup menu (re-reads every 5s)
+(market-prices@local)
+```
 
-3. Chande
-   - USD / IRR price, in Iranian toman
+## Tracked prices
+
+| Source | Value | Key in JSON | Unit |
+| --- | --- | --- | --- |
+| Trading Economics | Crude Oil | `tradingeconomics.crude_oil` | USD/BBL |
+| Trading Economics | Gold | `tradingeconomics.gold` | USD/OZ |
+| Trading Economics | Silver | `tradingeconomics.silver` | USD/OZ |
+| WallGold | Gold 18K (750) | `wallgold.gold_18k` | Toman |
+| Chande | USD / IRR | `chande.usd` | Toman |
+
+## Requirements
+
+- Linux with systemd (user services)
+- GNOME Shell 42–49 (for the top-bar indicator; the service works without it)
+- Python 3
+- Google Chrome or Chromium already installed
 
 ## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-playwright install chromium
+git clone https://github.com/<you>/market-prices.git
+cd market-prices
+./install.sh
+make enable
 ```
 
-On Debian/Ubuntu, if Chromium reports missing system libraries:
+The checkout can live anywhere; nothing assumes a particular path or
+username. `install.sh` is idempotent and does the following:
+
+1. Verifies the checkout is complete and locates an existing
+   Chrome/Chromium binary.
+2. Creates `.venv/` and installs `requirements.txt`.
+3. Smoke-tests Playwright against the system browser.
+4. Seeds `~/.config/market-prices/` with `update_interval` (default `300`)
+   and an empty `market-prices.json`.
+5. Writes the systemd unit `~/.config/systemd/user/market-prices.service`,
+   pointing at this checkout and the browser it found.
+6. Copies `extension/` to
+   `~/.local/share/gnome-shell/extensions/market-prices@local/`.
+
+The installer writes nothing into the project directory except `.venv/`.
+Because the systemd unit records absolute paths, re-run `./install.sh` if you
+move the checkout.
+
+On X11, reload GNOME Shell with <kbd>Alt</kbd>+<kbd>F2</kbd> → `r`. On
+Wayland, log out and back in.
+
+## Make targets
+
+| Target | Effect |
+| --- | --- |
+| `make install` | Run `./install.sh` |
+| `make enable` | Start + enable the service and enable the extension |
+| `make disable` | Stop the service and disable the extension |
+| `make restart` | Restart the service |
+| `make status` | `systemctl --user status market-prices.service` |
+| `make logs` | Follow the journal for the service |
+| `make interval MINUTES=5` | Set the update interval and restart the service |
+| `make refresh` | Run the scraper once, printing JSON to the terminal |
+| `make service-enable` / `service-disable` | Service only |
+| `make extension-enable` / `extension-disable` | Extension only |
+| `make uninstall` | Remove the unit, the extension and `~/.config/market-prices/` |
+
+## Running the scraper directly
+
+`market_scraper.py` takes no arguments. It prints one JSON document to stdout;
+all logging goes to stderr, so the output is safe to pipe.
 
 ```bash
-playwright install --with-deps chromium
+.venv/bin/python market_scraper.py > prices.json
 ```
 
-## Run
-
-```bash
-python market_scraper.py --pretty
-```
-
-Save JSON:
-
-```bash
-python market_scraper.py --output prices.json --pretty
-```
-
-Increase timeout:
-
-```bash
-python market_scraper.py --timeout 30 --pretty
-```
-
-## Why the implementation is different per website
-
-### Trading Economics
-
-The commodity pages expose the current value as an `Actual` value. The scraper
-fetches the three commodity pages and extracts that value.
-
-### WallGold
-
-The supplied HTML contains a site configuration pointing to:
-
-- `/wp-content/uploads/wallgold/prices.json`
-- `/wp-json/wgx/v1/data`
-
-and identifies the 18K gold data key as `gold18k`.
-
-The scraper therefore prefers the JSON snapshot instead of depending on the
-presentation HTML. If that endpoint is unavailable, it falls back to the
-`data-wgx-key="gold18k"` / `data-wgx-field="price"` HTML element.
-
-### Chande
-
-The supplied HTML is a Flutter application. The static HTML itself contains
-the `/chart/USD` route but the live price is rendered after the application
-loads.
-
-Therefore Chande is scraped with Playwright and Chromium, using the rendered
-page text rather than fragile Flutter DOM class names.
-
-## Output example
+## Output format
 
 ```json
 {
-  "timestamp": "2026-09-02T00:00:00+00:00",
-  "sources": {
-    "tradingeconomics": {
-      "crude_oil": {
-        "value": 81.03,
-        "unit": "USD/BBL"
-      },
-      "gold": {
-        "value": 4608.86,
-        "unit": "USD/t.oz"
-      },
-      "silver": {
-        "value": 69.27,
-        "unit": "USD/t.oz"
-      }
-    },
-    "wallgold": {
-      "value": 22225000,
-      "unit": "TMN",
-      "currency_name": "تومان"
-    },
-    "chande": {
-      "value": 210000,
-      "unit": "TMN",
-      "currency_name": "تومان"
-    }
+  "timestamp": "2026-09-05T12:26:00+03:30",
+  "tradingeconomics": {
+    "crude_oil": { "value": 81.03, "unit": "USD/BBL" },
+    "gold":      { "value": 4608.86, "unit": "USD/OZ" },
+    "silver":    { "value": 69.27, "unit": "USD/OZ" }
+  },
+  "wallgold": {
+    "gold_18k": { "value": 22225000, "unit": "TMN" }
+  },
+  "chande": {
+    "usd": { "value": 210000, "unit": "TMN" }
   }
 }
 ```
 
-The numeric values in this example are illustrative; the script fetches fresh
-values at runtime.
+The numbers above are illustrative. Any source that fails leaves its
+`value` as `null` rather than aborting the run, so one broken website never
+discards the other sources.
 
-## Production recommendation
+Iranian values are in **toman** (`TMN`) throughout — Chande's rial `priceBuy`
+is divided by 10 at fetch time.
 
-For periodic collection, run this script from cron/systemd/Kubernetes and
-write each result to a time-series database or append-only JSON/CSV rather
-than overwriting the same file.
+## Why each source is fetched differently
 
-The script intentionally returns `null` plus an `error` field when one source
-fails, so a temporary failure on one website does not discard successful data
-from the other sources.
+### Trading Economics
+
+The commodities page renders its table client-side, so it is loaded in
+headless Chrome via Playwright. The scraper first walks `table tr` rows and
+matches the first cell against `crude oil` / `gold` / `silver`, taking the
+first numeric cell that is not a unit. If a value is still missing it falls
+back to scanning the rendered `body` text for a line matching the commodity
+name and reads the next numeric line. No internal Trading Economics JSON
+endpoint is used.
+
+### WallGold
+
+WallGold exposes a public price API, so no browser is needed:
+
+```
+https://api.wallgold.ir/api/v1/price?side=buy&symbol=GLD_18C_750TMN
+```
+
+The price is read from `result.price`.
+
+### Chande
+
+Chande's site is a Flutter application whose static HTML contains no prices,
+but it is backed by a JSON API:
+
+```
+https://chande.net/api/v1/prices/USD
+```
+
+`priceBuy` is in rial and is divided by 10 to give toman.
+
+## Configuration
+
+| What | Where |
+| --- | --- |
+| Update interval (seconds) | `~/.config/market-prices/update_interval` — default `300`, minimum `10` |
+| Price cache | `~/.config/market-prices/market-prices.json` |
+| Config dir override | `MARKET_PRICES_CONFIG_DIR` env var (set in the systemd unit) |
+| Config dir location | Honours `XDG_CONFIG_HOME`, else `~/.config` |
+| Browser path | Autodetected from `PATH`; override with `MARKET_PRICES_CHROME` |
+
+The interval file is re-read on every loop iteration, so `make interval` takes
+effect on the next cycle even without the restart it performs.
+
+The scraper looks for `google-chrome`, `google-chrome-stable`, `chromium`,
+`chromium-browser` and `chrome` on `PATH`, in that order. `install.sh` records
+the browser it detected in the systemd unit as `MARKET_PRICES_CHROME`, so the
+service always uses the same one. Set that variable yourself to force a
+specific binary:
+
+```bash
+MARKET_PRICES_CHROME=/opt/chrome/chrome make refresh
+```
+
+### Cache merging
+
+The service deep-merges each scrape into the existing cache and keeps the old
+value wherever the new one is `null`. A transient failure therefore leaves the
+last known price on screen instead of blanking it, while `timestamp` always
+reflects the most recent successful run.
+
+## Repository layout
+
+| File | Role |
+| --- | --- |
+| `market_scraper.py` | One-shot scraper; the only file you edit to change sources |
+| `market_prices_service.py` | Service loop run by systemd |
+| `extension/` | GNOME Shell extension (`extension.js`, `metadata.json`) |
+| `install.sh` | Installer: venv, systemd unit, extension |
+| `Makefile` | Day-to-day commands; derives all paths at runtime |
+| `requirements.txt` | Python dependencies, installed into `.venv/` by `install.sh` |
+
+## Troubleshooting
+
+**No indicator in the top bar** — check that the extension is listed and
+enabled:
+
+```bash
+gnome-extensions list | grep market-prices
+gnome-extensions info market-prices@local
+```
+
+Then reload GNOME Shell (see [Install](#install)).
+
+**Indicator shows `--`** — the cache has no values yet. Check the service:
+
+```bash
+make status
+make logs
+```
+
+**Scraper fails to launch a browser** — run it by hand to see the Playwright
+error, and check that a browser is on `PATH`:
+
+```bash
+make refresh
+```
+
+**Extension errors** — GNOME Shell logs them to the journal:
+
+```bash
+journalctl --user -f -o cat /usr/bin/gnome-shell
+```
+
+## Production note
+
+For long-term collection, point the service at a time-series database or an
+append-only JSON/CSV log instead of overwriting a single cache file.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

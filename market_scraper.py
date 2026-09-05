@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -24,8 +26,16 @@ CHANDE_URL = "https://chande.net/api/v1/prices/USD"
 REQUEST_TIMEOUT = 20
 BROWSER_TIMEOUT = 30
 
-# Existing Google Chrome installation.
-CHROME_BINARY = "/usr/bin/google-chrome"
+# An existing Chrome/Chromium installation is used; Playwright never
+# downloads its own browser. Set MARKET_PRICES_CHROME to override the
+# autodetected path.
+CHROME_CANDIDATES = (
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "chrome",
+)
 
 
 # =============================================================================
@@ -100,20 +110,52 @@ def create_requests_session():
 # =============================================================================
 
 
+def find_chrome():
+    """
+    Locate an installed Chrome/Chromium binary.
+
+    MARKET_PRICES_CHROME wins if it is set; the installer puts the browser
+    it detected there via the systemd unit.
+    """
+
+    override = os.environ.get("MARKET_PRICES_CHROME")
+
+    if override:
+        if not os.access(override, os.X_OK):
+            raise RuntimeError(
+                f"MARKET_PRICES_CHROME is not executable: {override}"
+            )
+
+        return override
+
+    for name in CHROME_CANDIDATES:
+        path = shutil.which(name)
+
+        if path:
+            return path
+
+    raise RuntimeError(
+        "No Chrome/Chromium binary found. Install Google Chrome or "
+        "Chromium, or set MARKET_PRICES_CHROME to its path."
+    )
+
+
 def create_browser(playwright):
     """
-    Launch the existing Google Chrome installation.
+    Launch the existing Chrome/Chromium installation.
 
     No Playwright-managed Chromium and no ChromeDriver are required.
     """
 
+    chrome_binary = find_chrome()
+
     logging.info(
-        "Launching Google Chrome: %s",
-        CHROME_BINARY,
+        "Launching browser: %s",
+        chrome_binary,
     )
 
     browser = playwright.chromium.launch(
-        executable_path=CHROME_BINARY,
+        executable_path=chrome_binary,
         headless=True,
         args=[
             "--no-sandbox",
@@ -417,13 +459,13 @@ def collect():
         "wallgold": {
             "gold_18k": {
                 "value": None,
-                "unit": "IRR",
+                "unit": "TMN",
             },
         },
         "chande": {
             "usd": {
                 "value": None,
-                "unit": "IRR",
+                "unit": "TMN",
             },
         },
     }

@@ -4,9 +4,11 @@
 
 SERVICE := market-prices.service
 EXTENSION := market-prices@local
-PROJECT_DIR := /home/farid/src/market_scraper
-CONFIG_DIR := /home/farid/.config/market-prices
-PYTHON := /home/farid/src/market_scraper/.venv/bin/python
+
+# Derived at runtime so this works from any checkout, for any user.
+PROJECT_DIR := $(patsubst %/,%,$(dir $(realpath $(firstword $(MAKEFILE_LIST)))))
+CONFIG_DIR ?= $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/market-prices
+PYTHON := $(PROJECT_DIR)/.venv/bin/python
 
 .PHONY: install enable disable restart status logs interval refresh         extension-enable extension-disable service-enable service-disable         uninstall
 
@@ -50,7 +52,7 @@ logs:
 
 interval:
 	@test -n "$(MINUTES)" || 		(echo "Usage: make interval MINUTES=5"; exit 1)
-	@echo "$(( $(MINUTES) * 60 ))" > "$(CONFIG_DIR)/update_interval"
+	@echo "$$(( $(MINUTES) * 60 ))" > "$(CONFIG_DIR)/update_interval"
 	@echo "Update interval set to $(MINUTES) minutes."
 	@systemctl --user restart $(SERVICE)
 

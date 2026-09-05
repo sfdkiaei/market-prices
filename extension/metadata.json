@@ -1,0 +1,16 @@
+{
+    "uuid": "market-prices@local",
+    "name": "Market Prices",
+    "description": "Display market prices in the GNOME top bar",
+    "version": 1,
+    "shell-version": [
+        "42",
+        "43",
+        "44",
+        "45",
+        "46",
+        "47",
+        "48",
+        "49"
+    ]
+}
