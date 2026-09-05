@@ -40,7 +40,7 @@ GNOME extension              top bar label + popup menu (re-reads every 5s)
 ## Install
 
 ```bash
-git clone https://github.com/<you>/market-prices.git
+git clone https://github.com/sfdkiaei/market-prices.git
 cd market-prices
 ./install.sh
 make enable
