@@ -35,7 +35,6 @@ GNOME extension              top bar label + popup menu (re-reads every 5s)
 - Linux with systemd (user services)
 - GNOME Shell 42–49 (for the top-bar indicator; the service works without it)
 - Python 3
-- Google Chrome or Chromium already installed
 
 ## Install
 
@@ -49,15 +48,13 @@ make enable
 The checkout can live anywhere; nothing assumes a particular path or
 username. `install.sh` is idempotent and does the following:
 
-1. Verifies the checkout is complete and locates an existing
-   Chrome/Chromium binary.
+1. Verifies the checkout is complete.
 2. Creates `.venv/` and installs `requirements.txt`.
-3. Smoke-tests Playwright against the system browser.
-4. Seeds `~/.config/market-prices/` with `update_interval` (default `300`)
+3. Seeds `~/.config/market-prices/` with `update_interval` (default `300`)
    and an empty `market-prices.json`.
-5. Writes the systemd unit `~/.config/systemd/user/market-prices.service`,
-   pointing at this checkout and the browser it found.
-6. Copies `extension/` to
+4. Writes the systemd unit `~/.config/systemd/user/market-prices.service`,
+   pointing at this checkout.
+5. Copies `extension/` to
    `~/.local/share/gnome-shell/extensions/market-prices@local/`.
 
 The installer writes nothing into the project directory except `.venv/`.
@@ -122,17 +119,20 @@ is divided by 10 at fetch time.
 
 ### Trading Economics
 
-The commodities page renders its table client-side, so it is loaded in
-headless Chrome via Playwright. The scraper first walks `table tr` rows and
-matches the first cell against `crude oil` / `gold` / `silver`, taking the
-first numeric cell that is not a unit. If a value is still missing it falls
-back to scanning the rendered `body` text for a line matching the commodity
-name and reads the next numeric line. No internal Trading Economics JSON
-endpoint is used.
+The commodities table is server-rendered, so a plain HTTP request is enough
+and no browser is involved. The scraper walks the `<tr data-symbol="...">`
+rows, matches the row's `<b>` label against `crude oil` / `gold` / `silver`,
+and reads the price from that row's `<td id="p">` cell. The first matching
+row wins, since some names reappear further down the page. No internal
+Trading Economics JSON endpoint is used.
+
+The site sporadically answers the first request with `403` before it hands
+out a session cookie, so the fetch is retried a few times; once the session
+exists the endpoint is stable.
 
 ### WallGold
 
-WallGold exposes a public price API, so no browser is needed:
+WallGold exposes a public price API:
 
 ```
 https://api.wallgold.ir/api/v1/price?side=buy&symbol=GLD_18C_750TMN
@@ -159,20 +159,9 @@ https://chande.net/api/v1/prices/USD
 | Price cache | `~/.config/market-prices/market-prices.json` |
 | Config dir override | `MARKET_PRICES_CONFIG_DIR` env var (set in the systemd unit) |
 | Config dir location | Honours `XDG_CONFIG_HOME`, else `~/.config` |
-| Browser path | Autodetected from `PATH`; override with `MARKET_PRICES_CHROME` |
 
 The interval file is re-read on every loop iteration, so `make interval` takes
 effect on the next cycle even without the restart it performs.
-
-The scraper looks for `google-chrome`, `google-chrome-stable`, `chromium`,
-`chromium-browser` and `chrome` on `PATH`, in that order. `install.sh` records
-the browser it detected in the systemd unit as `MARKET_PRICES_CHROME`, so the
-service always uses the same one. Set that variable yourself to force a
-specific binary:
-
-```bash
-MARKET_PRICES_CHROME=/opt/chrome/chrome make refresh
-```
 
 ### Cache merging
 
@@ -211,8 +200,9 @@ make status
 make logs
 ```
 
-**Scraper fails to launch a browser** — run it by hand to see the Playwright
-error, and check that a browser is on `PATH`:
+**Trading Economics values are `null`** — run the scraper by hand and read
+the log it writes to stderr; a repeated `HTTP 403` means the retries were
+exhausted, and a changed table layout shows up as `values not found`:
 
 ```bash
 make refresh
